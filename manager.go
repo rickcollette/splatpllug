@@ -1,10 +1,8 @@
-// manager.go
 package splatplug
 
 import (
     "context"
     "encoding/json"
-    "errors"
     "fmt"
     "os"
     "os/exec"
@@ -14,7 +12,7 @@ import (
     "time"
 )
 
-// Plugin represents a running plugin process.
+// Plugin represents one running plugin subprocess.
 type Plugin struct {
     Name    string
     Version string
@@ -24,26 +22,26 @@ type Plugin struct {
     cmd     *exec.Cmd
 }
 
-// Manager loads and communicates with plugins.
+// Manager loads and communicates with multiple plugins.
 type Manager struct {
     mu      sync.Mutex
     plugins map[string]*Plugin
 }
 
-// NewManager returns a fresh plugin manager.
+// NewManager creates a fresh Manager instance.
 func NewManager() *Manager {
     return &Manager{plugins: make(map[string]*Plugin)}
 }
 
-// extensions we’ll accept per-OS
+// acceptable executable extensions by OS.
 var exeExts = map[string][]string{
     "windows": {".exe"},
     "darwin":  {""},
     "linux":   {""},
 }
 
-// LoadAll scans one or more directories for plugin executables,
-// then starts each in serve mode and performs the versioned handshake.
+// LoadAll scans the given dirs (default "./plugins") for executables,
+// starts each in RPC serve mode, and performs the semver/config handshake.
 func (m *Manager) LoadAll(dirs ...string) error {
     if len(dirs) == 0 {
         dirs = []string{"./plugins"}
@@ -63,12 +61,10 @@ func (m *Manager) LoadAll(dirs ...string) error {
             name := fi.Name()
             extOK := false
             for _, ext := range exeExts[runtime.GOOS] {
-                if ext != "" {
-                    if filepath.Ext(name) == ext {
-                        extOK = true
-                    }
-                } else {
-                    // no extension: require the execute permission bit on Unix
+                if ext != "" && filepath.Ext(name) == ext {
+                    extOK = true
+                }
+                if ext == "" {
                     info, err := fi.Info()
                     if err != nil {
                         continue
@@ -90,6 +86,8 @@ func (m *Manager) LoadAll(dirs ...string) error {
     return nil
 }
 
+// spawnAndHandshake starts the plugin process, sends/receives Info and HostInfo
+// (including Config), then registers the Plugin in m.plugins.
 func (m *Manager) spawnAndHandshake(path string) error {
     cmd := exec.Command(path)
     cmd.Env = append(os.Environ(), "SPLATPLUG_MODE=serve")
@@ -109,14 +107,12 @@ func (m *Manager) spawnAndHandshake(path string) error {
     dec := json.NewDecoder(stdout)
     enc := json.NewEncoder(stdin)
 
-    // 1) receive plugin Info with timeout
+    // 1) read plugin Info
     var pInfo Info
     ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
     defer cancel()
-
     errCh := make(chan error, 1)
     go func() { errCh <- dec.Decode(&pInfo) }()
-
     select {
     case err := <-errCh:
         if err != nil {
@@ -134,13 +130,19 @@ func (m *Manager) spawnAndHandshake(path string) error {
         return fmt.Errorf("plugin %s v%q != host v%q", pInfo.Name, pInfo.Version, HostVersion)
     }
 
-    // 3) send back host Info
-    if err := enc.Encode(HostInfo{Version: HostVersion}); err != nil {
+    // 3) prepare host Config (customize as needed)
+    hostConfig := map[string]string{
+        "db_host":   os.Getenv("DB_HOST"),
+        "log_level": os.Getenv("LOG_LEVEL"),
+    }
+
+    // 4) send HostInfo back
+    if err := enc.Encode(HostInfo{Version: HostVersion, Config: hostConfig}); err != nil {
         cmd.Process.Kill()
         return fmt.Errorf("send host Info: %w", err)
     }
 
-    // 4) register plugin
+    // 5) register in Manager
     pl := &Plugin{
         Name:    pInfo.Name,
         Version: pInfo.Version,
@@ -154,7 +156,8 @@ func (m *Manager) spawnAndHandshake(path string) error {
     return nil
 }
 
-// Lookup invokes a symbol on the named plugin and returns its result.
+// Lookup invokes the given symbol on pluginName with args, returning the result.
+// It applies timeouts, kills hung processes, and cleans up crashed plugins.
 func (m *Manager) Lookup(pluginName, symbol string, args ...interface{}) (interface{}, error) {
     m.mu.Lock()
     pl, ok := m.plugins[pluginName]
@@ -195,18 +198,15 @@ func (m *Manager) Lookup(pluginName, symbol string, args ...interface{}) (interf
         }
         errCh2 <- err
     }()
-
     select {
     case resp := <-respCh:
         if resp.Error != "" {
-            return nil, errors.New(resp.Error)
+            return nil, fmt.Errorf("%s", resp.Error)
         }
         return resp.Result, nil
-
     case err := <-errCh2:
         m.cleanup(pluginName)
         return nil, fmt.Errorf("plugin %q decode error: %w", pluginName, err)
-
     case <-ctx.Done():
         pl.cmd.Process.Kill()
         m.cleanup(pluginName)
@@ -214,11 +214,15 @@ func (m *Manager) Lookup(pluginName, symbol string, args ...interface{}) (interf
     }
 }
 
-// cleanup removes a crashed or timed‑out plugin.
-func (m *Manager) cleanup(name string) {
+// Plugins returns the list of currently‑loaded plugin names.
+func (m *Manager) Plugins() []string {
     m.mu.Lock()
-    delete(m.plugins, name)
-    m.mu.Unlock()
+    defer m.mu.Unlock()
+    names := make([]string, 0, len(m.plugins))
+    for n := range m.plugins {
+        names = append(names, n)
+    }
+    return names
 }
 
 // Shutdown cleanly terminates all plugin processes.
@@ -241,13 +245,9 @@ func (m *Manager) Shutdown() {
     m.plugins = make(map[string]*Plugin)
 }
 
-// Plugins returns the currently‐loaded plugin names.
-func (m *Manager) Plugins() []string {
+// cleanup removes a crashed or timed‑out plugin from the registry.
+func (m *Manager) cleanup(name string) {
     m.mu.Lock()
-    defer m.mu.Unlock()
-    names := make([]string, 0, len(m.plugins))
-    for n := range m.plugins {
-        names = append(names, n)
-    }
-    return names
+    delete(m.plugins, name)
+    m.mu.Unlock()
 }

@@ -6,31 +6,41 @@ import (
     "os"
 )
 
-// SymbolFunc defines the signature for RPC‑exposed functions.
+// HostConfig holds the host→plugin metadata sent during handshake.
+// Plugins can read HostConfig["key"] to get structured startup data.
+var HostConfig map[string]string
+
+// SymbolFunc is the signature for any RPC‑exposed function in a plugin.
 type SymbolFunc func(args []interface{}) (interface{}, error)
 
-// registry holds all registered symbols in this plugin.
+// registry maps symbol names to the functions registered by the plugin.
 var registry = make(map[string]SymbolFunc)
 
 // RegisterSymbol makes fn available under the given name.
+// Plugins call this in init or main before Serve().
 func RegisterSymbol(name string, fn SymbolFunc) {
     registry[name] = fn
 }
 
-// Serve starts JSON‑RPC over stdio, but only if SPLATPLUG_MODE=serve.
+// Serve enters RPC mode over stdio if SPLATPLUG_MODE=serve.
+// It sends the plugin’s Info, receives HostInfo, populates HostConfig,
+// and then loops decoding CallRequest → encoding CallResponse.
+//
+// Returns an error if the handshake fails or if any RPC encode/decode fails.
 func Serve(name, version string) error {
+    // only run RPC serve when told to
     if os.Getenv("SPLATPLUG_MODE") != "serve" {
         return nil
     }
     enc := json.NewEncoder(os.Stdout)
     dec := json.NewDecoder(os.Stdin)
 
-    // 1) send plugin Info
+    // 1) send plugin Info (no Config by default)
     if err := enc.Encode(Info{Name: name, Version: version}); err != nil {
         return fmt.Errorf("handshake send failed: %w", err)
     }
 
-    // 2) receive host Info
+    // 2) receive HostInfo
     var h HostInfo
     if err := dec.Decode(&h); err != nil {
         return fmt.Errorf("handshake recv failed: %w", err)
@@ -39,7 +49,10 @@ func Serve(name, version string) error {
         return fmt.Errorf("host v%q != plugin v%q", h.Version, version)
     }
 
-    // 3) enter RPC loop
+    // 3) save host‑provided config
+    HostConfig = h.Config
+
+    // 4) main RPC loop
     for {
         var req CallRequest
         if err := dec.Decode(&req); err != nil {
@@ -58,7 +71,7 @@ func Serve(name, version string) error {
             }
         }
 
-        if err := enc.Encode(resp); err != nil {
+        if err := enc.Encode(&resp); err != nil {
             return fmt.Errorf("splatplug: failed to encode response: %w", err)
         }
     }

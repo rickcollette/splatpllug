@@ -1,11 +1,13 @@
 # -------------------------------------------------------------------
-# examples: build loader into bin/loader and echo plugin into plugins/echo
-BIN_DIR     := bin
-PLUGIN_DIR  := plugins
-EXAMPLES    := echo loader
+# Build loader CLI and all example plugins:
+BIN_DIR    := bin
+PLUGIN_DIR := plugins
+
+# List of example plugins (must match folders under examples/)
+PLUGIN_EXAMPLES := echo math reverse rolodex
 
 .PHONY: examples
-examples: $(BIN_DIR)/loader $(PLUGIN_DIR)/echo
+examples: $(BIN_DIR)/loader $(PLUGIN_EXAMPLES:%=$(PLUGIN_DIR)/%)
 
 # ensure output dirs exist
 $(BIN_DIR):
@@ -18,8 +20,8 @@ $(PLUGIN_DIR):
 $(BIN_DIR)/loader: examples/loader/main.go | $(BIN_DIR)
 	go build -o $@ $<
 
-# build the echo plugin
-$(PLUGIN_DIR)/echo: examples/echo/main.go | $(PLUGIN_DIR)
+# build each plugin into plugins/<name>
+$(PLUGIN_DIR)/%: examples/%/main.go | $(PLUGIN_DIR)
 	go build -o $@ $<
 
 .PHONY: clean
