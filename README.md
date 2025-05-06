@@ -1,1 +1,1 @@
-# splatpllug
+# splatplug
