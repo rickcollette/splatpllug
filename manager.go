@@ -1,3 +1,4 @@
+// manager.go
 package splatplug
 
 import (
@@ -66,8 +67,15 @@ func (m *Manager) LoadAll(dirs ...string) error {
                     if filepath.Ext(name) == ext {
                         extOK = true
                     }
-                } else if fi.Type()&0111 != 0 {
-                    extOK = true
+                } else {
+                    // no extension: require the execute permission bit on Unix
+                    info, err := fi.Info()
+                    if err != nil {
+                        continue
+                    }
+                    if info.Mode()&0o111 != 0 {
+                        extOK = true
+                    }
                 }
             }
             if !extOK {
